@@ -1,3 +1,7 @@
+import os
+
+from openmdao.utils.mpi import MPI
+
 from mphys.core import Builder, MPhysVariables, Scenario
 
 
@@ -27,12 +31,47 @@ class ScenarioAerodynamic(Scenario):
             recordable=False,
             desc="The optional MPhys builder for the geometry",
         )
+        self.options.declare(
+            "geometry_comp",
+            default=None,
+            recordable=False,
+            desc="The optional MPhys component for the geometry (alternative in case there is no builder)",
+        )
+        self.options.declare(
+            "ffd_file",
+            default="ffd.xyz",
+            types=str,
+            recordable=False,
+            desc="This is the ffd file for the hacked comp",
+        )
+        self.options.declare(
+            "append_scenario_to_output_path",
+            default=False,
+            types=bool,
+            recordable=False,
+            desc="This option appends the scenario name to the output folder path. Must create directories in advance!",
+        )
+        self.options.declare(
+            "scenario_comm_callback",
+            default=None,
+            recordable=False,
+            desc="This option allows you to pass a call back function handle for function that takes the communicator and name for this scenario as input." \
+            "Intended for redirecting the IO for MultipointParallel cases but could be used for other things potentially.",
+        )
 
     def _mphys_scenario_setup(self):
         aero_builder: Builder = self.options["aero_builder"]
         geometry_builder: Builder = self.options["geometry_builder"]
+        geometry_comp: Builder = self.options["geometry_comp"]
+
+        if self.options["append_scenario_to_output_path"]:
+            aero_builder.options["outputDirectory"] = os.path.join(aero_builder.options["outputDirectory"],self.name)
 
         if self.options["in_MultipointParallel"]:
+            if self.options["scenario_comm_callback"] is not None:
+                func = self.options["scenario_comm_callback"]
+                func(self.comm,self.name)
+
             aero_builder.initialize(self.comm)
 
             if geometry_builder is not None:
@@ -54,6 +93,28 @@ class ScenarioAerodynamic(Scenario):
                 )
                 self.connect(
                     MPhysVariables.Aerodynamics.Surface.Geometry.COORDINATES_OUTPUT,
+                    MPhysVariables.Aerodynamics.Surface.COORDINATES_INITIAL,
+                )
+            elif geometry_comp is not None:
+                # Alternative that allows for insertion of a geometry group that doesn't have a builder
+                self.mphys_add_subsystem(
+                    "mesh", aero_builder.get_mesh_coordinate_subsystem(self.name)
+                )
+                self.mphys_add_subsystem(
+                    "geometry",
+                    geometry_comp(file=self.options["ffd_file"], type="ffd"),
+                )
+
+                self.connect(
+                    MPhysVariables.Aerodynamics.Surface.Mesh.COORDINATES,
+                    "geometry." + MPhysVariables.Aerodynamics.Surface.Geometry.COORDINATES_INPUT,
+                )
+                self.connect(
+                    "geometry." + MPhysVariables.Aerodynamics.Surface.Geometry.COORDINATES_OUTPUT,
+                    MPhysVariables.Aerodynamics.Surface.COORDINATES,
+                )
+                self.connect(
+                    "geometry." + MPhysVariables.Aerodynamics.Surface.Geometry.COORDINATES_OUTPUT,
                     MPhysVariables.Aerodynamics.Surface.COORDINATES_INITIAL,
                 )
             else:
